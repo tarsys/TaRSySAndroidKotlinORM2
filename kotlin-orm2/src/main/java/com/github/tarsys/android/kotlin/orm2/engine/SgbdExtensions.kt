@@ -8,153 +8,23 @@ import com.github.tarsys.android.kotlin.orm2.annotations.Index
 import com.github.tarsys.android.kotlin.orm2.annotations.Indexes
 import com.github.tarsys.android.kotlin.orm2.annotations.TableField
 import com.github.tarsys.android.kotlin.orm2.enums.DBDataType
+import com.github.tarsys.android.kotlin.orm2.enums.OrderCriteria
 import com.github.tarsys.android.kotlin.orm2.interfaces.IOrmEntity
 import com.github.tarsys.android.kotlin.orm2.sqlite.SQLiteSupport
 import com.github.tarsys.android.kotlin.orm2.toNotNullString
 import java.lang.reflect.ParameterizedType
+import java.lang.reflect.Proxy
 import java.util.*
+import java.util.regex.Pattern
 import kotlin.collections.ArrayList
+import kotlin.collections.HashMap
 import kotlin.reflect.KClass
 import kotlin.reflect.KMutableProperty
 import kotlin.reflect.KProperty
 import kotlin.reflect.full.*
 import kotlin.reflect.jvm.javaType
 
-//region sgbd field properties and methods
-
-val KProperty<*>.dbIndexes: ArrayList<Index>
-    get(){
-        val returnValue: ArrayList<Index> = arrayListOf()
-        val simpleIndex = this.findAnnotation<Index>()
-        val collectionIndexes = this.findAnnotation<Indexes>()
-        if (simpleIndex != null) returnValue += simpleIndex
-        if (collectionIndexes != null) returnValue += collectionIndexes.value
-
-        return returnValue
-    }
-
-val KProperty<*>.dbDataType: DBDataType
-    get(){
-        var returnValue: DBDataType = when (this.returnType){
-            Boolean::class.createType() -> DBDataType.BooleanDataType
-            Int::class.createType() -> DBDataType.IntegerDataType
-            Long::class.createType() -> DBDataType.LongDataType
-            Float::class.createType(), Double::class.createType() -> DBDataType.RealDataType
-            Date::class.createType() -> DBDataType.DateDataType
-            else -> DBDataType.StringDataType
-        }
-
-        if (this.returnType != Boolean::class.createType() &&
-            this.returnType != Int::class.createType() &&
-            this.returnType != Long::class.createType() &&
-            this.returnType != Float::class.createType() &&
-            this.returnType != Date::class.createType() &&
-            this.returnType != String::class.createType()){
-
-            when {
-                this.returnType.javaClass.isEnum -> {
-                    returnValue = DBDataType.EnumDataType
-                }
-                this.returnType.isSubtypeOf(IOrmEntity::class.starProjectedType) -> {
-                    returnValue = DBDataType.EntityDataType
-                }
-                this.returnType.isSubtypeOf(ArrayList::class.starProjectedType) -> {
-                    returnValue = DBDataType.EntityListDataType
-                }
-            }
-
-
-
-        }
-
-        return returnValue
-    }
-
-val KProperty<*>.dbDataTypeLength: Int
-    get(){
-        val tableField = this.findAnnotation<TableField>()
-
-        return when (this.returnType){
-            String::class.createType() -> if ((tableField?.DataTypeLength ?: 0) > 0) tableField!!.DataTypeLength else SgbdEngine.applicationInfo?.metaData?.getInt("DB_STRING_DEFAULT_LENGTH", 500) ?: 500
-            else -> 0
-        }
-    }
-
-val KProperty<*>.dbEntityClass: KClass<*>?
-    get(){
-        val ownedTableField: TableField? = this.findAnnotation()
-
-        if (ownedTableField?.EntityClass != null) return ownedTableField.EntityClass
-
-        if (ownedTableField?.DataType in arrayOf(DBDataType.EntityDataType, DBDataType.EntityListDataType)){
-            if (ownedTableField!!.DataType == DBDataType.EntityDataType){
-                if (this.returnType.findAnnotation<DBEntity>() != null)
-                    return this.returnType::class
-            }else{
-                val returnClass = this.returnType::class.java
-
-                if (returnClass == ArrayList::class.java && this.returnType.javaType is ParameterizedType){
-                    val pType = this.returnType.javaType as ParameterizedType
-                    val rType = pType.actualTypeArguments.firstOrNull()?.javaClass?.kotlin
-                    if (rType?.annotations?.firstOrNull { x -> x == DBEntity::class } != null)
-                        return rType
-                }
-            }
-        }
-
-        return null
-    }
-
-val KProperty<*>.tableField: TableField?
-    get(){
-        var returnValue: TableField? = null
-        val tField = this.findAnnotation<TableField>()
-
-        if (tField != null){
-            returnValue = this.fnTableField(tField)
-        }
-
-        return returnValue
-    }
-
-fun KProperty<*>.fnTableField(tableField: TableField): TableField?{
-    var returnValue: TableField? = null
-    val ownedTableField = this.findAnnotation<TableField>()
-
-    if (ownedTableField != null){
-        returnValue = TableField::class.constructors.first().call(
-            if (ownedTableField.FieldName.toLowerCase(Locale.ROOT).isEmpty()) this.name.toLowerCase(Locale.ROOT) else tableField.FieldName.toLowerCase(
-                Locale.ROOT),
-            tableField.Description,
-            tableField.ResourceDescription,
-            if (tableField.DataType != DBDataType.None) tableField.DataType else this.dbDataType,
-            if (tableField.DataTypeLength == 0) this.dbDataTypeLength else tableField.DataTypeLength,
-            tableField.EntityClass,
-            tableField.PrimaryKey,
-            tableField.ForeignKeyName,
-            tableField.ForeignKeyTableName,
-            tableField.ForeignKeyFieldName,
-            tableField.NotNull,
-            tableField.DefaultValue,
-            tableField.CascadeDelete,
-            tableField.AutoIncrement)
-    }
-
-    return returnValue
-}
-
-val KProperty<*>.fieldName: String
-    get() = "${(if(this.tableField!!.DataType == DBDataType.DateDataType) SQLiteSupport.PREFIX_DATE_FIELD else String().Empty)}${this.tableField!!.FieldName}"
-fun KProperty<*>.foreignKeyFieldName(dbEntity: DBEntity): String
-{
-    if (this.tableField != null){
-        return "${dbEntity.TableName.toLowerCase(Locale.ROOT)}_${this.fieldName}"
-    }
-
-    return String().Empty
-}
-
-//endregion
+//region useful function
 
 fun KClass<*>.createFilteringEntity(vClass: KClass<*>, dataCursor: Cursor): Any? {
     val dbEntity = this.dbEntity
@@ -209,20 +79,107 @@ fun KClass<*>.createFilteringEntity(vClass: KClass<*>, dataCursor: Cursor): Any?
     return returnValue
 }
 
+inline fun <reified T>KProperty<*>.getAnnotationHashMap(): HashMap<String, String>
+{
+    val paramsHash = HashMap<String, String>()
+    val annotation = this.annotations.firstOrNull { x -> x.annotationClass.simpleName == T::class.java.simpleName }
+
+    if (annotation != null) {
+        val aHandler = Proxy.getInvocationHandler(annotation)
+        val returnValue = Proxy.newProxyInstance(T::class.java.classLoader, arrayOf(T::class.java),aHandler) as? T
+        val stringObject = returnValue.toString()
+        val pRegex = Pattern.compile("(\\w+=\\w*).*?")
+        val matches = pRegex.matcher(stringObject)
+
+        // Once we have the parameters in the HashMap, by reflection we create the object directly.
+        while (matches.find()){
+            val paramValue = matches.group(1)?.split('=')
+            if (paramValue != null)
+                paramsHash[paramValue[0]] = paramValue[1]
+        }
+    }
+
+    return paramsHash
+}
+
+inline fun <reified T>KClass<*>.getAnnotationHashMap(): HashMap<String, String>
+{
+    val paramsHash = HashMap<String, String>()
+    val annotation = this.annotations.firstOrNull { x -> x.annotationClass.simpleName == T::class.java.simpleName }
+
+    if (annotation != null) {
+        val aHandler = Proxy.getInvocationHandler(annotation)
+        val returnValue = Proxy.newProxyInstance(T::class.java.classLoader, arrayOf(T::class.java),aHandler) as? T
+        val stringObject = returnValue.toString()
+        val pRegex = Pattern.compile("(\\w+=\\w*).*?")
+        val matches = pRegex.matcher(stringObject)
+
+        // Once we have the parameters in the HashMap, by reflection we create the object directly.
+        while (matches.find()){
+            val paramValue = matches.group(1)?.split('=')
+            if (paramValue != null)
+                paramsHash[paramValue[0]] = paramValue[1]
+        }
+    }
+
+    return paramsHash
+}
+
+fun KProperty<*>.fnTableField(tableField: TableField): TableField?{
+    var returnValue: TableField? = null
+    val ownedTableField = this.tableField
+
+    if (ownedTableField != null){
+        returnValue = TableField::class.constructors.first().call(
+            if (ownedTableField.FieldName.toLowerCase(Locale.ROOT).isEmpty()) this.name.toLowerCase(Locale.ROOT) else tableField.FieldName.toLowerCase(
+                Locale.ROOT),
+            tableField.Description,
+            tableField.ResourceDescription,
+            if (tableField.DataType != DBDataType.None) tableField.DataType else this.dbDataType,
+            if (tableField.DataTypeLength == 0) this.dbDataTypeLength else tableField.DataTypeLength,
+            tableField.EntityClass,
+            tableField.PrimaryKey,
+            tableField.ForeignKeyName,
+            tableField.ForeignKeyTableName,
+            tableField.ForeignKeyFieldName,
+            tableField.NotNull,
+            tableField.DefaultValue,
+            tableField.CascadeDelete,
+            tableField.AutoIncrement)
+    }
+
+    return returnValue
+}
+
+fun KProperty<*>.foreignKeyFieldName(dbEntity: DBEntity): String
+{
+    if (this.tableField != null){
+        return "${dbEntity.TableName.toLowerCase(Locale.ROOT)}_${this.fieldName}"
+    }
+
+    return String().Empty
+}
+
+fun KClass<*>.entityListRelationTables(addWithoutCascadeDelete: Boolean): List<String> = this.entityListFields
+    .filter { x -> x.tableField!!.CascadeDelete || (!addWithoutCascadeDelete && !x.tableField!!.CascadeDelete) }
+    .map { f -> "rel_${this.dbEntity!!.TableName.toLowerCase(Locale.ROOT)}_${f.dbEntityClass!!.tableName}" }
+
+//endregion
+
+//region sgbd field properties and methods
+
 val KClass<*>.dbEntity: DBEntity?
     get() {
         var returnValue: DBEntity? = null
-        val dbEntityTmp: DBEntity? = this.findAnnotation()
+        val dbEntityTmpHash = this.getAnnotationHashMap<DBEntity>()
 
-        if (dbEntityTmp != null) {
-            returnValue = if (dbEntityTmp.TableName.isEmpty()) DBEntity::class.constructors.first()
-                .call(this.simpleName?.toLowerCase(Locale.ROOT) ?: String().Empty,
-                    dbEntityTmp.Description,
-                    dbEntityTmp.ResourceDescription,
-                    dbEntityTmp.ResourceDrawable
-                ) else {
-                dbEntityTmp
-            }
+        if (dbEntityTmpHash.isNotEmpty()) {
+            returnValue = DBEntity::class.constructors.first()
+                .call(if (dbEntityTmpHash["TableName"]?.isEmpty() == true) this.simpleName?.toLowerCase(Locale.ROOT) else dbEntityTmpHash["TableName"],
+                    dbEntityTmpHash["Description"] ?: "",
+                    dbEntityTmpHash["ResourceDescription"]?.toIntOrNull() ?: 0,
+                    dbEntityTmpHash["ResourceDrawable"]?.toIntOrNull() ?: 0
+                )
         }
 
         return returnValue
@@ -236,7 +193,7 @@ val KClass<*>.dbTable: DBTable?
         if (dbEntity != null){
             try{
                 returnValue = DBTable()
-                val properties = this.memberProperties.filter { x -> x.findAnnotation<TableField>() != null }.toList()
+                val properties = this.memberProperties.filter { x -> x.annotations.any { x -> x.annotationClass.simpleName!!.contains("TableField") } } //this.memberProperties.filter { x -> x.tableField != null }.toList()
                 returnValue.relatedClass = this
                 returnValue.table = this.dbEntity
                 returnValue.fields.addAll(properties.mapNotNull { x -> x.tableField })
@@ -245,6 +202,7 @@ val KClass<*>.dbTable: DBTable?
 
             }catch (ex: Exception){
                 returnValue = null
+                ex.printStackTrace()
             }
         }
 
@@ -285,7 +243,7 @@ val KClass<*>.primaryKeyFieldNames: ArrayList<String>
 val KClass<*>.withForeignEntities: Boolean
     get() {
         if (this.dbEntity != null){
-            return this.memberProperties.firstOrNull { x -> x.findAnnotation<TableField>()?.DataType in arrayOf(DBDataType.EntityDataType, DBDataType.EntityListDataType) } != null
+            return this.memberProperties.firstOrNull { x -> x.tableField?.DataType in arrayOf(DBDataType.EntityDataType, DBDataType.EntityListDataType) } != null
         }
 
         return false
@@ -329,12 +287,143 @@ val KClass<*>.tableFieldProperties: ArrayList<KProperty<*>>
         val returnValue: ArrayList<KProperty<*>> = arrayListOf()
 
         if (this.dbEntity != null){
-            returnValue += this.memberProperties.filter { x -> x.findAnnotation<TableField>()!= null }
+            returnValue += this.memberProperties.filter { x -> x.tableField != null }
         }
 
         return returnValue
     }
 
-fun KClass<*>.entityListRelationTables(addWithoutCascadeDelete: Boolean): List<String> = this.entityListFields
-    .filter { x -> x.tableField!!.CascadeDelete || (!addWithoutCascadeDelete && !x.tableField!!.CascadeDelete) }
-    .map { f -> "rel_${this.dbEntity!!.TableName.toLowerCase(Locale.ROOT)}_${f.dbEntityClass!!.tableName}" }
+
+val KProperty<*>.tableField: TableField?
+    get(){
+        var returnValue: TableField? = null
+        val tableFieldHash = this.getAnnotationHashMap<TableField>()
+
+        if (tableFieldHash.isNotEmpty()){
+            returnValue = TableField::class.constructors.first().call(
+                if (tableFieldHash["FieldName"]?.toLowerCase(Locale.ROOT)?.isEmpty() == true) this.name.toLowerCase(Locale.ROOT) else tableFieldHash["FieldName"]!!.toLowerCase(Locale.ROOT),
+                tableFieldHash["Description"],
+                tableFieldHash["ResourceDescription"]?.toIntOrNull() ?: 0,
+                if (tableFieldHash["DataType"] != "None") DBDataType.DataType(tableFieldHash["DataType"]?: "StringDataType" ) else this.dbDataType,
+                tableFieldHash["DataTypeLength"]?.toIntOrNull() ?: this.dbDataTypeLength,
+                if (tableFieldHash["EntityClass"].isNullOrEmpty() || tableFieldHash["EntityClass"].equals("class", true)) String::class else Class.forName(tableFieldHash["EntityClass"]!!),
+                tableFieldHash["PrimaryKey"].toBoolean(),
+                tableFieldHash["ForeignKeyName"],
+                tableFieldHash["ForeignKeyTableName"],
+                tableFieldHash["ForeignKeyFieldName"],
+                tableFieldHash["NotNull"].toBoolean(),
+                tableFieldHash["DefaultValue"],
+                tableFieldHash["CascadeDelete"].toBoolean(),
+                tableFieldHash["AutoIncrement"].toBoolean()
+            )
+        }
+
+        return returnValue
+    }
+
+/**
+ * Pendiente agregar control a Annotation @Indexes
+ */
+val KProperty<*>.dbIndexes: ArrayList<Index>
+    get(){
+        val returnValue: ArrayList<Index> = arrayListOf()
+
+        val simpleIndexHashMap: HashMap<String, String> = this.getAnnotationHashMap<Index>()
+        val collectionIndexesHashMap = this.getAnnotationHashMap<Indexes>()
+
+        if (simpleIndexHashMap.isNotEmpty()){
+            returnValue += Index::class.constructors.first().call(
+                simpleIndexHashMap["IndexName"],
+                simpleIndexHashMap["IndexFields"],
+                simpleIndexHashMap["IsUniqueIndex"].toBoolean(),
+                simpleIndexHashMap["Collation"],
+                OrderCriteria.valueOf(simpleIndexHashMap["Order"] ?: "Asc")
+            )
+        }
+
+        if (collectionIndexesHashMap.isNotEmpty()){
+            //val collectionIndexes: Indexes = null
+            //if (collectionIndexes != null) returnValue += collectionIndexes.value
+        }
+
+
+
+        return returnValue
+    }
+
+val KProperty<*>.dbDataType: DBDataType
+    get(){
+        var returnValue: DBDataType = when (this.returnType){
+            Boolean::class.createType() -> DBDataType.BooleanDataType
+            Int::class.createType() -> DBDataType.IntegerDataType
+            Long::class.createType() -> DBDataType.LongDataType
+            Float::class.createType(), Double::class.createType() -> DBDataType.RealDataType
+            Date::class.createType() -> DBDataType.DateDataType
+            else -> DBDataType.StringDataType
+        }
+
+        if (this.returnType != Boolean::class.createType() &&
+            this.returnType != Int::class.createType() &&
+            this.returnType != Long::class.createType() &&
+            this.returnType != Float::class.createType() &&
+            this.returnType != Date::class.createType() &&
+            this.returnType != String::class.createType()){
+
+            when {
+                this.returnType.javaClass.isEnum -> {
+                    returnValue = DBDataType.EnumDataType
+                }
+                this.returnType.isSubtypeOf(IOrmEntity::class.starProjectedType) -> {
+                    returnValue = DBDataType.EntityDataType
+                }
+                this.returnType.isSubtypeOf(ArrayList::class.starProjectedType) -> {
+                    returnValue = DBDataType.EntityListDataType
+                }
+            }
+
+
+
+        }
+
+        return returnValue
+    }
+
+val KProperty<*>.dbDataTypeLength: Int
+    get(){
+        val tableField = this.tableField
+
+        return when (this.returnType){
+            String::class.createType() -> if ((tableField?.DataTypeLength ?: 0) > 0) tableField!!.DataTypeLength else SgbdEngine.applicationInfo?.metaData?.getInt("DB_STRING_DEFAULT_LENGTH", 500) ?: 500
+            else -> 0
+        }
+    }
+
+val KProperty<*>.dbEntityClass: KClass<*>?
+    get(){
+        val ownedTableField: TableField? = this.tableField
+
+        if (ownedTableField?.EntityClass != null) return ownedTableField.EntityClass
+
+        if (ownedTableField?.DataType in arrayOf(DBDataType.EntityDataType, DBDataType.EntityListDataType)){
+            if (ownedTableField!!.DataType == DBDataType.EntityDataType){
+                if (this.returnType::class.dbEntity != null)
+                    return this.returnType::class
+            }else{
+                val returnClass = this.returnType::class.java
+
+                if (returnClass == ArrayList::class.java && this.returnType.javaType is ParameterizedType){
+                    val pType = this.returnType.javaType as ParameterizedType
+                    val rType = pType.actualTypeArguments.firstOrNull()?.javaClass?.kotlin
+                    if (rType?.dbEntity != null)
+                        return rType
+                }
+            }
+        }
+
+        return null
+    }
+
+val KProperty<*>.fieldName: String
+    get() = "${(if(this.tableField!!.DataType == DBDataType.DateDataType) SQLiteSupport.PREFIX_DATE_FIELD else String().Empty)}${this.tableField!!.FieldName}"
+
+//endregion

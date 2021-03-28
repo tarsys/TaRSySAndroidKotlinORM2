@@ -5,8 +5,7 @@ import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
-import android.os.Environment
-import android.preference.PreferenceManager
+import androidx.preference.PreferenceManager
 import android.util.Log
 import com.github.tarsys.android.kotlin.orm2.Empty
 import com.github.tarsys.android.kotlin.orm2.toNotNullString
@@ -132,8 +131,8 @@ class SgbdEngine {
                 this.entityContainers = entityContainers
                 databaseName = applicationInfo!!.metaData.getString("DATABASE_NAME", "${context.packageName}.db")
                 databaseFolder = applicationInfo!!.metaData.getString("DATABASE_DIRECTORY", "")
-                databaseSQLitePath = (if (isExternalStorage) Environment.getExternalStorageDirectory().absolutePath + File.separator + databaseFolder
-                else Environment.getDataDirectory().absolutePath) + File.separator + databaseName
+                databaseSQLitePath = (if (isExternalStorage) context.getExternalFilesDir(null)!!.absolutePath + File.separator + databaseFolder
+                else context.getDatabasePath(databaseName)!!.absolutePath)
                 val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
                 val savedAppVersion: Int = if (!File(databaseSQLitePath).exists()) 0 else prefs.getInt("AppVersion", 0)
                 val currentAppVersion: Int = packageInfo.versionCode
@@ -144,13 +143,14 @@ class SgbdEngine {
                 }
 
                 if (isExternalStorage){
-                    if (!File(Environment.getExternalStorageDirectory().absolutePath + File.separator + databaseFolder).exists()) {
-                        if (!File(Environment.getExternalStorageDirectory().absolutePath + File.separator + databaseFolder).mkdirs()) {
-                            throw IOException("${Environment.getExternalStorageDirectory().absolutePath}${File.separator}${databaseFolder} NOT CREATED!")
+                    if (!File(databaseSQLitePath).exists()) {
+                        if (!File(databaseSQLitePath).mkdirs()) {
+                            throw IOException("${databaseSQLitePath} NOT CREATED!")
                         }
                     }
                 }
 
+                databaseSQLitePath += File.separator + databaseName
                 if (savedAppVersion != currentAppVersion){
                     val sqlCreation: ArrayList<String> = arrayListOf()
 
