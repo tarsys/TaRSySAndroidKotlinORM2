@@ -102,53 +102,34 @@ inline fun <reified T>KProperty<*>.getAnnotationHashMap(): HashMap<String, Strin
     return paramsHash
 }
 
+fun String.extractKeyValues(): HashMap<String, String>{
+    val pRegex = Pattern.compile("(\\w+)\\s*=\\s*(\\[.*?\\]|\\w*)") //Pattern.compile("(\\w+=\\w*).*?")
+    val matches = pRegex.matcher(this)
+    val paramsHash = HashMap<String, String>()
+    // Once we have the parameters in the HashMap, by reflection we create the object directly.
+    while (matches.find()){
+        //val paramValue = matches.group(1)?.split('=')
+        //if (paramValue != null)
+        //    paramsHash[paramValue[0]] = paramValue[1]
+        paramsHash[matches.group(1)] = matches.group(2)
+    }
+
+    return paramsHash
+}
+
 inline fun <reified T>KClass<*>.getAnnotationHashMap(): HashMap<String, String>
 {
-    val paramsHash = HashMap<String, String>()
     val annotation = this.annotations.firstOrNull { x -> x.annotationClass.simpleName == T::class.java.simpleName }
 
     if (annotation != null) {
         val aHandler = Proxy.getInvocationHandler(annotation)
         val returnValue = Proxy.newProxyInstance(T::class.java.classLoader, arrayOf(T::class.java),aHandler) as? T
         val stringObject = returnValue.toString()
-        val pRegex = Pattern.compile("(\\w+=\\w*).*?")
-        val matches = pRegex.matcher(stringObject)
 
-        // Once we have the parameters in the HashMap, by reflection we create the object directly.
-        while (matches.find()){
-            val paramValue = matches.group(1)?.split('=')
-            if (paramValue != null)
-                paramsHash[paramValue[0]] = paramValue[1]
-        }
+        return  stringObject.extractKeyValues()
     }
 
-    return paramsHash
-}
-
-fun KProperty<*>.fnTableField(tableField: TableField): TableField?{
-    var returnValue: TableField? = null
-    val ownedTableField = this.tableField
-
-    if (ownedTableField != null){
-        returnValue = TableField::class.constructors.first().call(
-            if (ownedTableField.FieldName.toLowerCase(Locale.ROOT).isEmpty()) this.name.toLowerCase(Locale.ROOT) else tableField.FieldName.toLowerCase(
-                Locale.ROOT),
-            tableField.Description,
-            tableField.ResourceDescription,
-            if (tableField.DataType != DBDataType.None) tableField.DataType else this.dbDataType,
-            if (tableField.DataTypeLength == 0) this.dbDataTypeLength else tableField.DataTypeLength,
-            tableField.EntityClass,
-            tableField.PrimaryKey,
-            tableField.ForeignKeyName,
-            tableField.ForeignKeyTableName,
-            tableField.ForeignKeyFieldName,
-            tableField.NotNull,
-            tableField.DefaultValue,
-            tableField.CascadeDelete,
-            tableField.AutoIncrement)
-    }
-
-    return returnValue
+    return HashMap()
 }
 
 fun KProperty<*>.foreignKeyFieldName(dbEntity: DBEntity): String
@@ -185,6 +166,47 @@ val KClass<*>.dbEntity: DBEntity?
         return returnValue
     }
 
+/**
+ * Pendiente agregar control a Annotation @Indexes
+ */
+val KClass<*>.dbIndexes: ArrayList<Index>
+    get(){
+        val returnValue: ArrayList<Index> = arrayListOf()
+
+        val simpleIndexHashMap: HashMap<String, String> = this.getAnnotationHashMap<Index>()
+        if (simpleIndexHashMap.isNotEmpty()){
+            returnValue += Index::class.constructors.first().call(
+                simpleIndexHashMap["IndexName"],
+                simpleIndexHashMap["IndexFields"]!!.replace("[","").replace("]","").replace(" ","").split(",").toTypedArray(),
+                simpleIndexHashMap["IsUniqueIndex"].toBoolean(),
+                simpleIndexHashMap["Collation"],
+                OrderCriteria.valueOf(simpleIndexHashMap["Order"] ?: "Asc")
+            )
+        }
+
+        val indexesAnnotation = this.annotations.firstOrNull { x -> x.annotationClass.simpleName == Indexes::class.java.simpleName }
+        if (indexesAnnotation != null){
+            val stringObject = indexesAnnotation.toString().replace("@${Indexes::class.qualifiedName}(value=[","").replace("), ",")|").replace("])","")
+            val indexes = stringObject.split("|")
+            if (indexes.isNotEmpty()){
+                returnValue.addAll(
+                    indexes.map { ix ->
+                        val hash = ix.extractKeyValues()
+
+                        Index::class.constructors.first().call(
+                            hash["IndexName"],
+                            hash["IndexFields"]!!.replace("[","").replace("]","").replace(" ","").split(",").toTypedArray(),
+                            hash["IsUniqueIndex"].toBoolean(),
+                            hash["Collation"],
+                            OrderCriteria.valueOf(hash["Order"] ?: "Asc")
+                        )
+                    })
+            }
+        }
+
+        return returnValue
+    }
+
 val KClass<*>.dbTable: DBTable?
     get() {
         var returnValue: DBTable? = null
@@ -197,11 +219,11 @@ val KClass<*>.dbTable: DBTable?
                 returnValue.relatedClass = this
                 returnValue.table = this.dbEntity
                 returnValue.fields.addAll(properties.mapNotNull { x -> x.tableField })
-                returnValue.indexes += properties.flatMap { x -> x.dbIndexes }
+                returnValue.indexes += this.dbIndexes
 
 
             }catch (ex: Exception){
-                returnValue = null
+                    returnValue = null
                 ex.printStackTrace()
             }
         }
@@ -317,36 +339,6 @@ val KProperty<*>.tableField: TableField?
                 tableFieldHash["AutoIncrement"].toBoolean()
             )
         }
-
-        return returnValue
-    }
-
-/**
- * Pendiente agregar control a Annotation @Indexes
- */
-val KProperty<*>.dbIndexes: ArrayList<Index>
-    get(){
-        val returnValue: ArrayList<Index> = arrayListOf()
-
-        val simpleIndexHashMap: HashMap<String, String> = this.getAnnotationHashMap<Index>()
-        val collectionIndexesHashMap = this.getAnnotationHashMap<Indexes>()
-
-        if (simpleIndexHashMap.isNotEmpty()){
-            returnValue += Index::class.constructors.first().call(
-                simpleIndexHashMap["IndexName"],
-                simpleIndexHashMap["IndexFields"],
-                simpleIndexHashMap["IsUniqueIndex"].toBoolean(),
-                simpleIndexHashMap["Collation"],
-                OrderCriteria.valueOf(simpleIndexHashMap["Order"] ?: "Asc")
-            )
-        }
-
-        if (collectionIndexesHashMap.isNotEmpty()){
-            //val collectionIndexes: Indexes = null
-            //if (collectionIndexes != null) returnValue += collectionIndexes.value
-        }
-
-
 
         return returnValue
     }
