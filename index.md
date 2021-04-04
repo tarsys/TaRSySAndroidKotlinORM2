@@ -39,7 +39,7 @@ The integration with your project is very simple, let's see it in somesteps:
   ```
 3. Add in your Launcher activity this code:
   ```kotlin
-    if (SGBDEngine.initialize(this)){
+    if (SgbdEngine.initialize(this)){
       // TODO: Do some stuff
     }else{
       // if something wrong, do other stuff
@@ -50,7 +50,7 @@ The integration with your project is very simple, let's see it in somesteps:
     package com.tarsys.examplekotlinorm.entities
   
     @DBEntity
-    class Car: Serializable, IOrmEntity {
+    class Car: IOrmEntity {
       @TableField(PrimaryKey = true)
       var Id: Int = 0
       @TableField
@@ -62,7 +62,7 @@ The integration with your project is very simple, let's see it in somesteps:
     }
   
     @DBEntity
-    class Person: Serializable, IOrmEntity {
+    class Person: IOrmEntity {
       @TableField(PrimaryKey = true)
       var Id: Int = 0
       @TableField(DataTypeLength = 60)
